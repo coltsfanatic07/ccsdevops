@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<assembly>
+   <id>zip-release</id>
+   <formats>
+      <format>zip</format>
+   </formats>
+   <includeBaseDirectory>false</includeBaseDirectory>
+   <fileSets>
+      <fileSet>
+         <directory>.</directory>
+         <outputDirectory>.</outputDirectory>
+         <directoryMode>0775</directoryMode>
+         <fileMode>0775</fileMode>
+         <includes>
+            <include>**/*.cma</include>
+         </includes>
+      </fileSet>
+   </fileSets>
+    <files>
+      <file>
+         <source>scripts/runCMABatch.sh</source>
+         <fileMode>0775</fileMode>
+         <filtered>true</filtered>
+      </file>
+      <file>
+         <source>scripts/runCreateMigrationDSExport.sh</source>
+         <fileMode>0775</fileMode>
+         <filtered>true</filtered>
+      </file>
+      <file>
+         <source>scripts/runCreateMigrationDSImport.sh</source>
+         <fileMode>0775</fileMode>
+         <filtered>true</filtered>
+      </file>
+    </files>
+</assembly>

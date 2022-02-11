@@ -1,0 +1,15 @@
+{
+  "config": [
+    {
+      "envName": "CCS-SANDBOX",
+      "envDisplayName": "CCS-DEV (C012H2)",
+      "envIDCSAppCode": "C012H2",
+      "envCCSEnvLogoUrl": "https:\/\/objectstorage.us-ashburn-1.oraclecloud.com\/p\/xRZQJX9CkASlZ-4hHo2FpTnuLXNZis-qE9QB3UGoF-SvE7LQ9yEppkPIdAzFGyLx\/n\/idqhodlmc22u\/b/ENV-Logos\/o\/OUCCS_SANDBOX.png",      
+      "envCCSRestApiUrl": "https:\/\/stg.utilities-cloud.oracleindustry.com\/c012h2\/dev\/ccs\/rest\/apis",
+      "envCCSSqlRestUrl": "https:\/\/stg.utilities-cloud.oracleindustry.com\/c012h2\/dev\/ccs\/sql\/rest",
+      "envCCSSrcEnvReference": "https:\/\/stg.utilities-cloud.oracleindustry.com\/c012h2\/dev\/ccs\/web\/usermap?language=ENG",
+      "envCMAExportBucket": "CFG1-CMA-Export",
+      "envCMAImportBucket": "CFG1-CMA-Import"
+    }
+  ]
+}

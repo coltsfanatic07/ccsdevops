@@ -1,0 +1,104 @@
+name: build workflow
+
+on:
+#   push:
+#     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Target Build Environment
+        required: true
+        options: 
+        - CCS-SANDBOX
+      migrRequestId:
+        type: choice
+        description: Migration Request ID
+        required: true
+        options:
+        - CM-MigrDemo
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: checkout
+        uses: actions/checkout@v2
+        with:
+          token: "${{ secrets.JJFRANCO_GA_TOKEN }}"
+        
+      - name: jq-action
+        uses: sergeysova/jq-action@v2
+      
+      - name: oci-cli-action
+        uses: bytesbay/oci-cli-action@v1.0.2
+        with:
+          user: ${{ secrets.AEP_OCI_DEVOPSUSER }}
+          fingerprint: ${{ secrets.AEP_OCI_DEVOPSUSER_FINGERPRINT }}
+          tenancy: ${{ secrets.AEP_OCI_TENANCY }}
+          region: ${{ secrets.AEP_OCI_REGION }}
+          api_key: ${{ secrets.AEP_OCI_DEVOPSUSER_APIKEY }}
+          verbose: true
+                    
+      - name: retrieve current date
+        id: date
+        run: echo "::set-output name=date::$(date +'%y%m')"
+        
+      - name: retrieve environment config and migration export variables
+        run: |
+          echo TARGET_ENVIRONMENT="$(echo ${{ github.event.inputs.environment }})" >> $GITHUB_ENV
+          echo ENV_DISPLAYNAME="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envDisplayName')" >> $GITHUB_ENV
+          echo ENV_IDCSAPPCODE="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envIDCSAppCode')" >> $GITHUB_ENV
+          echo ENV_CCSRESTAPIURL="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCCSRestApiUrl')" >> $GITHUB_ENV
+          echo ENV_CCSSQLRESTURL="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCCSSqlRestUrl')" >> $GITHUB_ENV
+          echo ENV_CCSSRCENVREFERENCE="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCCSSrcEnvReference')" >> $GITHUB_ENV
+          echo ENV_CMAEXPORTBUCKET="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCMAExportBucket')" >> $GITHUB_ENV
+          echo ENV_CMAIMPORTBUCKET="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCMAImportBucket')" >> $GITHUB_ENV
+          echo CMA_FILENAME="$(echo export-release-workflow-${{ github.run_number }}.cma)" >> $GITHUB_ENV
+          echo MIGR_REQUEST_ID="$(echo "${{ github.event.inputs.migrRequestId }}")" >> $GITHUB_ENV
+          echo RELEASE_NAME="$(echo build-${{ steps.date.outputs.date }}.${{ github.run_number }})" >> $GITHUB_ENV
+          
+      - name: create migration data set export
+        working-directory: scripts
+        run: |
+          chmod 775 runCreateMigrationDSExport.sh
+          ./runCreateMigrationDSExport.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} ${{ secrets.AEP_OCI_STORAGE_NAMESPACE }} ${{ env.ENV_CMAEXPORTBUCKET }} ${{ env.CMA_FILENAME }} ${{ env.MIGR_REQUEST_ID }} ${{ env.ENV_CCSSRCENVREFERENCE }}
+                            
+      - name: download CMA
+        run: |
+          oci os object get -ns ${{ secrets.AEP_OCI_STORAGE_NAMESPACE }} --bucket-name ${{ env.ENV_CMAEXPORTBUCKET }} --name ${{ env.CMA_FILENAME }} --file ${{ env.CMA_FILENAME }}
+          pwd
+          ls -lrt
+                    
+      - name: maven release build
+        run: |
+          mvn -X clean package -Dgithub-actions.build.version=${{ env.RELEASE_NAME }}
+          cd target
+          ls -lrt
+          
+      - name: create release
+        uses: actions/create-release@v1
+        id: create_release
+        with:
+          draft: false
+          prerelease: false
+          release_name: ${{ env.RELEASE_NAME }}
+          tag_name: ${{ env.RELEASE_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.JJFRANCO_GA_TOKEN }}
+          
+      - name: upload artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.JJFRANCO_GA_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/ouccs-release-${{ env.RELEASE_NAME }}.zip
+          asset_name: ouccs-release-${{ env.RELEASE_NAME }}.zip
+          asset_content_type: application/gzip
+
+      - name: delete CMA file
+        run: |
+          oci os object delete -ns ${{ secrets.AEP_OCI_STORAGE_NAMESPACE }} --bucket-name ${{ env.ENV_CMAEXPORTBUCKET }} --name ${{ env.CMA_FILENAME }} --force
+          

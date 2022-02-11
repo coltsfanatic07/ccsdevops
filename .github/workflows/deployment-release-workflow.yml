@@ -1,0 +1,200 @@
+name: deployment workflow
+
+on:
+#   push:
+#     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: 'Target Environment'
+        required: true
+        options: 
+        - CCS-SANDBOX
+      targetRelease:
+        description: 'Target Release (ex. build-YYMM.XX)'
+        required: true
+        default: 'LATEST'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: checkout
+        uses: actions/checkout@v2
+        with:
+          token: "${{ secrets.JJFRANCO_GA_TOKEN }}"
+        
+      - name: use provided input GIT release
+        if: github.event.inputs.targetRelease != 'LATEST'
+        run: |
+          git fetch --tags
+          echo RELEASE_NAME="$(echo "${{ github.event.inputs.targetRelease }}")" >> $GITHUB_ENV
+          
+      - name: retrieve latest GIT release
+        if: github.event.inputs.targetRelease == 'LATEST'
+        run: |
+          git fetch --tags
+          echo RELEASE_NAME="$(git tag | tail -1)" >> $GITHUB_ENV
+          
+      - name: retrieve GIT release tags
+        id: checkGitReleaseTag
+        run: |
+          echo "::set-output name=listGitTag::$(git tag -l ${{ env.RELEASE_NAME }})"
+          
+      - name: validate GIT release
+        if: steps.checkGitReleaseTag.outputs.listGitTag == ''
+        run: |
+          echo "[ERROR] The target GIT release version: ${{ env.RELEASE_NAME }} does not exist."
+          exit 1
+          
+      - name: jq-action
+        uses: sergeysova/jq-action@v2
+      
+      - name: oci-cli-action
+        uses: bytesbay/oci-cli-action@v1.0.2
+        with:
+          user: ${{ secrets.AEP_OCI_DEVOPSUSER }}
+          fingerprint: ${{ secrets.AEP_OCI_DEVOPSUSER_FINGERPRINT }}
+          tenancy: ${{ secrets.AEP_OCI_TENANCY }}
+          region: ${{ secrets.AEP_OCI_REGION }}
+          api_key: ${{ secrets.AEP_OCI_DEVOPSUSER_APIKEY }}
+          verbose: true
+                    
+      - name: retrieve current date
+        id: date
+        run: echo "::set-output name=date::$(date +'%y%m')"
+        
+      - name: define CMA import bucket
+        run: |
+          echo ENV_CMAIMPORTBUCKET="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCMAImportBucket')" >> $GITHUB_ENV
+                        
+      - name: environment variables
+        run: |
+          echo TARGET_ENVIRONMENT="$(echo ${{ github.event.inputs.environment }})" >> $GITHUB_ENV
+          echo ENV_DISPLAYNAME="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envDisplayName')" >> $GITHUB_ENV
+          echo ENV_IDCSAPPCODE="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envIDCSAppCode')" >> $GITHUB_ENV
+          echo ENV_CCSRESTAPIURL="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCCSRestApiUrl')" >> $GITHUB_ENV
+          echo ENV_CCSSQLRESTURL="$(cat environment-config/"${{ github.event.inputs.environment }}".json | jq --raw-output '.config[].envCCSSqlRestUrl')" >> $GITHUB_ENV
+          echo CMA_FILENAME="$(echo import-release-${{ env.RELEASE_NAME }}-workflow-${{ github.run_number }}.cma)" >> $GITHUB_ENV
+        
+      - name: download target release
+        uses: dsaltares/fetch-gh-release-asset@master
+        with:
+          version: "tags/${{ env.RELEASE_NAME }}"
+          file: "ouccs-release-${{ env.RELEASE_NAME }}.zip"
+          token: "${{ secrets.JJFRANCO_GA_TOKEN }}"
+          
+      - name: unzip target release and rename CMA file
+        run: |
+          unzip ouccs-release-${{ env.RELEASE_NAME }}.zip
+          mv *.cma ${{ env.CMA_FILENAME }}
+          ls -lrt
+          pwd
+          
+      - name: upload CMA
+        run: |
+          oci os object put --bucket-name ${{ env.ENV_CMAIMPORTBUCKET }} --file ${{ env.CMA_FILENAME }}
+          
+      - name: retrieve CMA objects
+        run: |
+          oci os object list --bucket-name ${{ env.ENV_CMAIMPORTBUCKET }} --fields name,timeCreated >> raw_get_cma_object_list.json
+          echo CMA_OBJLIST="$(cat raw_get_cma_object_list.json | jq --raw-output '.data | length')" >> $GITHUB_ENV
+          
+      - name: validate CMA files
+        if: env.CMA_OBJLIST != 1
+        run: |
+          echo "[ERROR] There should be only 1 CMA file in the object storage bucket: ${{ env.ENV_CMAIMPORTBUCKET }}"
+          exit 1
+          
+      - name: create migration data set import
+        working-directory: scripts
+        run: |
+          chmod 775 runCreateMigrationDSImport.sh
+          ./runCreateMigrationDSImport.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} ${{ secrets.AEP_OCI_STORAGE_NAMESPACE }} ${{ env.ENV_CMAIMPORTBUCKET }} ${{ env.CMA_FILENAME }}
+          
+      - name: retrieve migration data set import details
+        working-directory: scripts
+        run: |
+          echo MIGR_DATA_SET_IMPORT_ID="$(cat .env | grep MIGR_DATA_SET_IMPORT_ID | cut -d '=' -f2)" >> $GITHUB_ENV
+          echo MIGR_DATA_SET_IMPORT_STATUS="$(cat .env | grep MIGR_DATA_SET_IMPORT_STATUS | cut -d '=' -f2)" >> $GITHUB_ENV
+          
+      - name: run migration object monitor batch (F1-MGOPR)
+        if: env.MIGR_DATA_SET_IMPORT_STATUS == 'READY2COMP'
+        working-directory: scripts
+        run: |
+          chmod 775 runCMABatch.sh
+          ./runCMABatch.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} 'F1-MGOPR'
+          
+      - name: run migration transaction monitor batch (F1-MGTPR)
+        working-directory: scripts
+        run: |
+          chmod 775 runCMABatch.sh
+          ./runCMABatch.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} 'F1-MGTPR'
+          
+      - name: run migration data set import monitor batch (F1-MGDIM)
+        working-directory: scripts
+        run: |
+          chmod 775 runCMABatch.sh
+          ./runCMABatch.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} 'F1-MGDIM'
+          
+      - name: run migration object monitor apply batch (F1-MGOAP)
+        working-directory: scripts
+        run: |
+          chmod 775 runCMABatch.sh
+          ./runCMABatch.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} 'F1-MGOAP'
+          
+      - name: run migration data set import monitor batch (F1-MGDIM)
+        working-directory: scripts
+        run: |
+          chmod 775 runCMABatch.sh
+          ./runCMABatch.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} 'F1-MGDIM'
+          
+      - name: run migration transaction monitor apply batch (F1-MGTAP)
+        working-directory: scripts
+        run: |
+          chmod 775 runCMABatch.sh
+          ./runCMABatch.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} 'F1-MGTAP'
+          
+      - name: run migration data set import monitor batch (F1-MGDIM)
+        working-directory: scripts
+        run: |
+          chmod 775 runCMABatch.sh
+          ./runCMABatch.sh ${{ env.ENV_CCSRESTAPIURL }} ${{ env.ENV_CCSSQLRESTURL }} ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} 'F1-MGDIM'
+          
+      - name: check migration data set import status
+        run: |
+          curl -X POST --user ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} \
+            --data-binary "select bo_status_cd from f1_migr_data_st where migr_data_set_id='${{ env.MIGR_DATA_SET_IMPORT_ID }}' and bus_obj_cd='F1-MigrDataSetImport'" -H "Content-Type: application/sql" \
+            -k ${{ env.ENV_CCSSQLRESTURL }} >> raw_f1_migr_data_st_status.json
+            
+            echo MIGR_DATA_SET_IMPORT_STATUS="$(cat raw_f1_migr_data_st_status.json | jq --raw-output '.items[].resultSet.items[].bo_status_cd' | sed 's/ *$//')" >> $GITHUB_ENV
+            
+      - name: verify migration data set import status
+        if: env.MIGR_DATA_SET_IMPORT_STATUS != 'APPLIED'
+        run: |
+          echo "[ERROR] The CMA Import Process Failed. Please check Migration Data Set ID: ${{ env.MIGR_DATA_SET_IMPORT_ID }}"
+          exit 1
+          
+      - name: update cm release version
+        run: |
+          curl -X PUT "${{ env.ENV_CCSRESTAPIURL }}/cm/admin/devops/releaseVersion/${{ env.RELEASE_NAME }}" \
+            -H "accept: application/json" -H "Content-Type: application/json" -d \
+            "{\"action\":\"UPD\",\"customerRelease\":{\"releaseId\":\"${{ env.RELEASE_NAME }}\",\"releaseIdSuffix\":\"\",\"buildNbr\":\"\",\"patchNumber\":\"\"}}" \
+            --user ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }}
+            
+          curl -X POST --user ${{ secrets.AEP_OUCCS_SBX_API_TOKEN }} \
+            --data-binary "select release_id from ci_install_prod where owner_flg='CM'" -H "Content-Type: application/sql" \
+            -k ${{ env.ENV_CCSSQLRESTURL }} >> raw_cm_release_version_installed.json
+            
+          echo CM_RELEASE_VERSION="$(cat raw_cm_release_version_installed.json | jq --raw-output '.items[].resultSet.items[].release_id' | sed 's/ *$//')" >> $GITHUB_ENV
+            
+      - name: validate cm release version
+        if: env.CM_RELEASE_VERSION != env.RELEASE_NAME
+        run: |
+          echo "[ERROR] The CM release version installed is not aligned to the target build release. Deployment Failed.
+          echo "[ERROR] CM Release Version Installed : ${{ env.CM_RELEASE_VERSION }}"
+          echo "[ERROR] Target Build Release         : ${{ env.RELEASE_NAME }}"
+          exit 1
+          
